@@ -1,0 +1,76 @@
+sensor:
+  - platform: rest
+    name: "Eagles Score"
+    unique_id: eagles_score_espn
+    resource: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+    scan_interval: 30
+    value_template: >
+      {% set ns = namespace(score='unavailable') %}
+      {% for event in value_json.events %}
+        {% for comp in event.competitions %}
+          {% for competitor in comp.competitors %}
+            {% if competitor.team.abbreviation == 'PHI' %}
+              {% set ns.score = competitor.score %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+      {% endfor %}
+      {{ ns.score }}
+
+script:
+  eagles_touchdown_celebration:
+    alias: "Eagles Touchdown Celebration"
+    sequence:
+      - service: scene.create
+        data:
+          scene_id: pre_eagles_celebration
+          snapshot_entities:
+            - light.downstairs
+
+      - repeat:
+          count: 5
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id: light.downstairs
+              data:
+                rgb_color: [0, 173, 97]
+                brightness: 255
+                transition: 0
+            - delay: "00:00:00.5"
+            - service: light.turn_on
+              target:
+                entity_id: light.downstairs
+              data:
+                rgb_color: [255, 255, 255]
+                brightness: 255
+                transition: 0
+            - delay: "00:00:00.5"
+
+      - service: media_player.play_media
+        target:
+          entity_id: media_player.first_floor
+        data:
+          media_content_id: /local/eagles_fight_song.mp3
+          media_content_type: music
+
+      - delay: "00:00:30"
+
+      - service: scene.turn_on
+        target:
+          entity_id: scene.pre_eagles_celebration
+
+automation:
+  - id: eagles_touchdown_trigger
+    alias: "Eagles Touchdown - Trigger Celebration"
+    trigger:
+      - platform: state
+        entity_id: sensor.eagles_score
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.from_state.state not in ['unavailable', 'unknown', 'none', ''] and
+             trigger.to_state.state not in ['unavailable', 'unknown', 'none', ''] and
+             trigger.to_state.state | int(0) > trigger.from_state.state | int(0) }}
+    action:
+      - service: script.eagles_touchdown_celebration
