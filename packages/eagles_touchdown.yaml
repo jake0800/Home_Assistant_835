@@ -47,11 +47,20 @@ script:
                 transition: 0
             - delay: "00:00:00.5"
 
+      - service: media_player.volume_set
+        target:
+          entity_id: media_player.first_floor
+        data:
+          volume_level: 0.6
+
+      # Served from the Media folder (/media/eagles_fight_song.mp3) so Home
+      # Assistant resolves it to a full, signed URL the speaker can fetch.
+      # A bare "/local/..." path is relative and many speakers can't load it.
       - service: media_player.play_media
         target:
           entity_id: media_player.first_floor
         data:
-          media_content_id: /local/eagles_fight_song.mp3
+          media_content_id: media-source://media_source/local/eagles_fight_song.mp3
           media_content_type: music
 
       - delay: "00:00:30"
