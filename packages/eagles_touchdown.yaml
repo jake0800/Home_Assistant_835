@@ -1,85 +1,144 @@
-sensor:
-  - platform: rest
-    name: "Eagles Score"
-    unique_id: eagles_score_espn
-    resource: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-    scan_interval: 30
-    value_template: >
-      {% set ns = namespace(score='unavailable') %}
-      {% for event in value_json.events %}
-        {% for comp in event.competitions %}
-          {% for competitor in comp.competitors %}
-            {% if competitor.team.abbreviation == 'PHI' %}
-              {% set ns.score = competitor.score %}
-            {% endif %}
+# ---------------------------------------------------------------------------
+# Eagles Touchdown Celebration  (Home Assistant package)
+# Updated 2026-09-13 — see README.md in the project folder for status/notes.
+#
+# Requires HA 2024.10+ (modern triggers:/conditions:/actions: syntax).
+# Requires:  config/www/eagles_fight_song.mp3   (served as /local/...)
+#            light.downstairs   media_player.first_floor
+# ---------------------------------------------------------------------------
+
+# One ESPN fetch feeds both sensors. Slow baseline poll (every 2 min);
+# an automation below bumps it to every 5 s while the Eagles game is live.
+rest:
+  - resource: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+    scan_interval: 120
+    headers:
+      Content-Type: application/json
+    sensor:
+      # sensor.eagles_score  -> current Eagles points (unknown on a bye week)
+      - name: "Eagles Score"
+        unique_id: eagles_score_sensor
+        value_template: >
+          {% set ns = namespace(score=none) %}
+          {% for event in value_json.events %}
+            {% for comp in event.competitions %}
+              {% for team in comp.competitors %}
+                {% if team.team.abbreviation == 'PHI' %}
+                  {% set ns.score = team.score | int(0) %}
+                {% endif %}
+              {% endfor %}
+            {% endfor %}
           {% endfor %}
-        {% endfor %}
-      {% endfor %}
-      {{ ns.score }}
+          {{ ns.score if ns.score is not none else 'unknown' }}
+
+      # sensor.eagles_game_state -> pre | in | post | none (no game this week)
+      - name: "Eagles Game State"
+        unique_id: eagles_game_state_sensor
+        value_template: >
+          {% set ns = namespace(state='none') %}
+          {% for event in value_json.events %}
+            {% for comp in event.competitions %}
+              {% for team in comp.competitors %}
+                {% if team.team.abbreviation == 'PHI' %}
+                  {% set ns.state = event.status.type.state %}
+                {% endif %}
+              {% endfor %}
+            {% endfor %}
+          {% endfor %}
+          {{ ns.state }}
 
 script:
   eagles_touchdown_celebration:
     alias: "Eagles Touchdown Celebration"
+    mode: single
     sequence:
-      - service: scene.create
+      # Remember how the lights were
+      - action: scene.create
         data:
           scene_id: pre_eagles_celebration
           snapshot_entities:
             - light.downstairs
 
+      # Start the fight song right away (clip is ~44 s)
+      - action: media_player.volume_set
+        target:
+          entity_id: media_player.first_floor
+        data:
+          volume_level: 0.6
+
+      - action: media_player.play_media
+        target:
+          entity_id: media_player.first_floor
+        data:
+          media_content_id: /local/eagles_fight_song.mp3
+          media_content_type: music
+
+      # Flash midnight green / white  (10 x 2 s = 20 s)
+      # light.downstairs is a Hue ZONE. The Hue Bridge rate-limits grouped-light
+      # commands to ~1/sec, so each color holds for 1 s. transition: 0 = clean snap.
       - repeat:
-          count: 5
+          count: 10
           sequence:
-            - service: light.turn_on
+            - action: light.turn_on
               target:
                 entity_id: light.downstairs
               data:
-                rgb_color: [0, 173, 97]
+                rgb_color: [0, 76, 84]
                 brightness: 255
                 transition: 0
-            - delay: "00:00:00.5"
-            - service: light.turn_on
+            - delay: "00:00:01"
+            - action: light.turn_on
               target:
                 entity_id: light.downstairs
               data:
                 rgb_color: [255, 255, 255]
                 brightness: 255
                 transition: 0
-            - delay: "00:00:00.5"
+            - delay: "00:00:01"
 
-      - service: media_player.volume_set
-        target:
-          entity_id: media_player.first_floor
-        data:
-          volume_level: 0.6
+      # Hold the celebration until the song ends (20 s flash + 24 s = 44 s)
+      - delay: "00:00:24"
 
-      # Served from the Media folder (/media/eagles_fight_song.mp3) so Home
-      # Assistant resolves it to a full, signed URL the speaker can fetch.
-      # A bare "/local/..." path is relative and many speakers can't load it.
-      - service: media_player.play_media
-        target:
-          entity_id: media_player.first_floor
-        data:
-          media_content_id: media-source://media_source/local/eagles_fight_song.mp3
-          media_content_type: music
-
-      - delay: "00:00:30"
-
-      - service: scene.turn_on
+      # Put the lights back
+      - action: scene.turn_on
         target:
           entity_id: scene.pre_eagles_celebration
 
 automation:
-  - id: eagles_touchdown_trigger
-    alias: "Eagles Touchdown - Trigger Celebration"
-    trigger:
-      - platform: state
+  # Poll ESPN every 2 seconds, but only while the Eagles game is live.
+  # (ESPN itself lags the broadcast by 10-30 s; this only trims our share.)
+  - alias: "Eagles Score Fast Poll"
+    id: eagles_score_fast_poll
+    mode: single
+    triggers:
+      - trigger: time_pattern
+        seconds: "/2"
+    conditions:
+      - condition: state
+        entity_id: sensor.eagles_game_state
+        state: "in"
+    actions:
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.eagles_score
+
+  # Fire the celebration on a touchdown (score jumps by 6+).
+  # Ignores field goals, PATs, safeties, and ESPN dropouts.
+  - alias: "Eagles Touchdown"
+    id: eagles_touchdown_trigger
+    mode: single
+    triggers:
+      - trigger: state
         entity_id: sensor.eagles_score
-    condition:
+    conditions:
+      - condition: state
+        entity_id: sensor.eagles_game_state
+        state: "in"
       - condition: template
         value_template: >
-          {{ trigger.from_state.state not in ['unavailable', 'unknown', 'none', ''] and
-             trigger.to_state.state not in ['unavailable', 'unknown', 'none', ''] and
-             trigger.to_state.state | int(0) > trigger.from_state.state | int(0) }}
-    action:
-      - service: script.eagles_touchdown_celebration
+          {{ trigger.from_state is not none
+             and is_number(trigger.from_state.state)
+             and is_number(trigger.to_state.state)
+             and (trigger.to_state.state | int) - (trigger.from_state.state | int) >= 6 }}
+    actions:
+      - action: script.eagles_touchdown_celebration
